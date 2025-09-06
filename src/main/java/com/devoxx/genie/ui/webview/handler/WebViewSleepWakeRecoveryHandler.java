@@ -15,6 +15,7 @@ import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * Main coordinator for sleep/wake recovery for JCEF browsers.
@@ -46,6 +47,9 @@ public class WebViewSleepWakeRecoveryHandler {
     private final AtomicLong lastComponentEventTime = new AtomicLong(0);
     
     private final AtomicBoolean recoveryInProgress = new AtomicBoolean(false);
+    
+    // Callback for notifying about potential deadlock (user-accessible recovery)
+    private Consumer<String> deadlockNotificationCallback;
 
     public WebViewSleepWakeRecoveryHandler(JBCefBrowser browser) {
         this.browser = browser;
@@ -73,6 +77,7 @@ public class WebViewSleepWakeRecoveryHandler {
             // Set up callbacks
             browserStateMonitor.setRecoveryCallback(this::onRecoveryNeeded);
             renderingDetector.setRecoveryCallback(this::onRecoveryNeeded);
+            renderingDetector.setDeadlockNotificationCallback(this::onDeadlockDetected);
             
             debugLogger.debug("All specialized handlers initialized successfully");
             
@@ -451,6 +456,46 @@ public class WebViewSleepWakeRecoveryHandler {
         debugLogger.info("Manual recovery triggered");
         needsRecovery.set(true);
         scheduleRecovery("Manual trigger");
+    }
+    
+    /**
+     * Reset deadlock detection state (can be called during natural recovery points).
+     * This helps prevent false deadlock detection after new conversation recovery.
+     */
+    public void resetDeadlockDetection(String reason) {
+        debugLogger.info("Resetting deadlock detection: {}", reason);
+        
+        if (renderingDetector != null) {
+            renderingDetector.resetDeadlockDetection(reason);
+        }
+        
+        // Reset any other deadlock-related state if needed
+        needsRecovery.set(false);
+        debugLogger.debug("Deadlock detection reset completed");
+    }
+    
+    /**
+     * Set callback to be notified when potential deadlock is detected.
+     * This allows the main UI to provide user-accessible recovery options.
+     */
+    public void setDeadlockNotificationCallback(Consumer<String> callback) {
+        this.deadlockNotificationCallback = callback;
+        debugLogger.debug("Deadlock notification callback set in recovery handler");
+    }
+    
+    /**
+     * Handle deadlock detection notification from rendering detector.
+     * This forwards the notification to the main UI for user-accessible recovery.
+     */
+    private void onDeadlockDetected(String message) {
+        debugLogger.warn("Deadlock detected: {}", message);
+        
+        if (deadlockNotificationCallback != null) {
+            // Forward to main UI for user notification and recovery options
+            deadlockNotificationCallback.accept(message);
+        } else {
+            debugLogger.error("No deadlock notification callback set - user will need to restart IDE");
+        }
     }
     
     /**

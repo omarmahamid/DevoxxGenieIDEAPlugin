@@ -210,6 +210,16 @@ public class MessageRenderer implements FileReferencesListener {
     }
     
     /**
+     * Get the web view controller for external access.
+     * This allows other components to access WebView functionality.
+     * 
+     * @return the ConversationWebViewController instance
+     */
+    public ConversationWebViewController getWebViewController() {
+        return webViewController;
+    }
+    
+    /**
      * Check if there are black screen issues with the webview.
      * This delegates to the webview controller to check for rendering problems.
      * 

@@ -149,6 +149,9 @@ public class ConversationWebViewController implements ThemeChangeNotifier, MCPLo
         themeManager = new WebViewThemeManager(browser, webServer, jsExecutor, this::showWelcomeContent);
         sleepWakeRecoveryHandler = new WebViewSleepWakeRecoveryHandler(browser);
         
+        // Setup deadlock notification callback for user-accessible recovery
+        sleepWakeRecoveryHandler.setDeadlockNotificationCallback(this::handleDeadlockNotification);
+        
         // Initialize external link handler
         externalLinkHandler = new WebViewExternalLinkHandler(webServer.getServerUrl(), jsExecutor);
         
@@ -161,6 +164,118 @@ public class ConversationWebViewController implements ThemeChangeNotifier, MCPLo
         }
     }
 
+    /**
+     * Handle deadlock notification from the recovery system.
+     * Shows user notification with recovery option.
+     */
+    private void handleDeadlockNotification(String message) {
+        log.warn("WebView deadlock detected: {}", message);
+        
+        // Use IntelliJ's notification system to show user a non-intrusive recovery option
+        ApplicationManager.getApplication().invokeLater(() -> {
+            try {
+                com.intellij.notification.Notification notification = new com.intellij.notification.Notification(
+                    "DevoxxGenie.WebView",
+                    "WebView Recovery",
+                    "WebView appears unresponsive. Click 'Recover' to fix it, or start a new conversation.",
+                    com.intellij.notification.NotificationType.WARNING
+                );
+                
+                // Add recovery action
+                notification.addAction(new com.intellij.openapi.actionSystem.AnAction("Recover WebView") {
+                    @Override
+                    public void actionPerformed(com.intellij.openapi.actionSystem.AnActionEvent e) {
+                        log.info("User triggered manual WebView recovery from notification");
+                        notification.expire();
+                        
+                        if (sleepWakeRecoveryHandler != null) {
+                            sleepWakeRecoveryHandler.triggerRecovery();
+                        } else {
+                            log.error("Cannot recover - sleep wake recovery handler is null");
+                        }
+                    }
+                });
+                
+                // Show notification
+                com.intellij.notification.Notifications.Bus.notify(notification);
+                
+                log.info("Deadlock recovery notification shown to user");
+                
+            } catch (Exception e) {
+                log.error("Failed to show deadlock notification", e);
+            }
+        });
+    }
+    
+    /**
+     * Manually trigger WebView recovery (public API).
+     */
+    public void triggerManualRecovery() {
+        log.info("Manual WebView recovery triggered via public API");
+        
+        if (sleepWakeRecoveryHandler != null) {
+            sleepWakeRecoveryHandler.triggerRecovery();
+        } else {
+            log.error("Cannot trigger recovery - sleep wake recovery handler is null");
+        }
+    }
+    
+    /**
+     * Get the sleep wake recovery handler for external access.
+     */
+    public WebViewSleepWakeRecoveryHandler getSleepWakeRecoveryHandler() {
+        return sleepWakeRecoveryHandler;
+    }
+    
+    /**
+     * Get current WebView state for debugging/testing purposes.
+     * This method provides insight into the WebView's internal state.
+     */
+    public String getDebugState() {
+        StringBuilder state = new StringBuilder();
+        state.append("WebView Debug State:\n");
+        state.append("- Initialized: ").append(initialized.get()).append("\n");
+        state.append("- Browser available: ").append(browser != null).append("\n");
+        
+        if (browser != null) {
+            try {
+                JComponent component = browser.getComponent();
+                state.append("- Component available: ").append(component != null).append("\n");
+                
+                if (component != null) {
+                    state.append("- Component showing: ").append(component.isShowing()).append("\n");
+                    state.append("- Component displayable: ").append(component.isDisplayable()).append("\n");
+                    state.append("- Component size: ").append(component.getWidth()).append("x").append(component.getHeight()).append("\n");
+                    
+                    Color bg = component.getBackground();
+                    if (bg != null) {
+                        state.append("- Background color: RGB(").append(bg.getRed()).append(",").append(bg.getGreen()).append(",").append(bg.getBlue()).append(")\n");
+                        state.append("- Is black background: ").append(bg.equals(Color.BLACK)).append("\n");
+                    }
+                }
+                
+                if (browser.getCefBrowser() != null) {
+                    state.append("- CEF Browser URL: ").append(browser.getCefBrowser().getURL()).append("\n");
+                }
+                
+            } catch (Exception e) {
+                state.append("- Error getting component state: ").append(e.getMessage()).append("\n");
+            }
+        }
+        
+        if (jsExecutor != null) {
+            state.append("- JS Executor stats: ").append(jsExecutor.getExecutionStats()).append("\n");
+        }
+        
+        if (sleepWakeRecoveryHandler != null) {
+            state.append("- Recovery handler available: true\n");
+        } else {
+            state.append("- Recovery handler available: false\n");
+        }
+        
+        return state.toString();
+    }
+    
     /**
      * Setup JavaScript bridge to handle file opening.
      * Should only be called if JCEF is available.

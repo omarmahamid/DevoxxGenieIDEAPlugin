@@ -25,7 +25,12 @@ public class WebViewRenderingDetector {
     private final AtomicLong lastRenderCheck = new AtomicLong(System.currentTimeMillis());
     
     private Consumer<String> recoveryCallback;
+    private Consumer<String> deadlockNotificationCallback; // NEW: For notifying UI about potential deadlock
     private Timer renderCheckTimer;
+    
+    // Deadlock prevention - conservative approach
+    private final AtomicLong deadlockDetectionTime = new AtomicLong(0);
+    private final AtomicBoolean deadlockNotificationSent = new AtomicBoolean(false);
     
     // Black rectangle detection
     private static final long RENDER_CHECK_INTERVAL = 30000; // 30 seconds - reduced frequency
@@ -49,6 +54,15 @@ public class WebViewRenderingDetector {
     public void setRecoveryCallback(Consumer<String> callback) {
         this.recoveryCallback = callback;
         debugLogger.debug("Recovery callback set for rendering detector");
+    }
+    
+    /**
+     * Set callback to notify UI about potential deadlock situations.
+     * This allows the UI to provide user-accessible recovery options.
+     */
+    public void setDeadlockNotificationCallback(Consumer<String> callback) {
+        this.deadlockNotificationCallback = callback;
+        debugLogger.debug("Deadlock notification callback set for rendering detector");
     }
     
     /**
@@ -94,7 +108,21 @@ public class WebViewRenderingDetector {
         consecutiveRenderIssues.set(0);
         suspectedBlackRectangle.set(false);
         lastRenderCheck.set(System.currentTimeMillis());
+        
+        // Reset deadlock detection state
+        resetDeadlockDetection("Detection counters reset");
+        
         debugLogger.debug("Rendering detection counters reset");
+    }
+    
+    /**
+     * Reset deadlock detection state when issues are resolved.
+     */
+    public void resetDeadlockDetection(String reason) {
+        if (deadlockDetectionTime.getAndSet(0) > 0) {
+            debugLogger.info("Deadlock detection reset: {}", reason);
+            deadlockNotificationSent.set(false);
+        }
     }
     
     /**
@@ -303,17 +331,93 @@ public class WebViewRenderingDetector {
     }
     
     /**
-     * Increment render issues counter but don't trigger automatic recovery.
-     * Recovery will only happen when creating a new conversation.
+     * Increment render issues counter with conservative deadlock prevention.
+     * Maintains original design philosophy while providing escape hatch for true deadlock.
      */
     private void incrementRenderIssues(String reason) {
         int issueCount = consecutiveRenderIssues.incrementAndGet();
         debugLogger.warn("Render issue detected: {} (consecutive issues: {})", reason, issueCount);
         
         if (issueCount >= MAX_CONSECUTIVE_RENDER_ISSUES) {
+            // Mark suspected black rectangle for other components to detect
+            suspectedBlackRectangle.set(true);
+            
+            // Original design: Wait for new conversation (still preferred)
             debugLogger.warn("Max consecutive render issues reached - will recover on next new conversation");
-            // Don't trigger automatic recovery - let the new conversation flow handle it
-            // triggerRecovery("Render issues: " + reason + " (consecutive: " + issueCount + ")");
+            
+            // NEW: Conservative deadlock prevention - only notify UI about potential deadlock
+            handlePotentialDeadlock(reason, issueCount);
+        }
+    }
+    
+    /**
+     * Handle potential deadlock scenario conservatively.
+     * Only notifies UI for user-controlled recovery, no automatic actions.
+     */
+    private void handlePotentialDeadlock(String reason, int issueCount) {
+        // Set deadlock detection time if not already set
+        if (deadlockDetectionTime.compareAndSet(0, System.currentTimeMillis())) {
+            debugLogger.info("Starting deadlock monitoring - detected at {}", System.currentTimeMillis());
+        }
+        
+        long timeSinceDetection = System.currentTimeMillis() - deadlockDetectionTime.get();
+        
+        // Only notify UI after issues persist for reasonable time AND we detect true unresponsiveness
+        if (timeSinceDetection > 2 * 60 * 1000 && // 2 minutes
+            isWebViewTrulyUnresponsive() && 
+            !deadlockNotificationSent.getAndSet(true)) {
+            
+            debugLogger.warn("Potential WebView deadlock detected after {}ms - notifying UI for user recovery option", timeSinceDetection);
+            
+            if (deadlockNotificationCallback != null) {
+                deadlockNotificationCallback.accept("WebView appears unresponsive: " + reason + 
+                                                  " (issues detected for " + (timeSinceDetection / 1000) + " seconds)");
+            } else {
+                debugLogger.warn("No deadlock notification callback - user will need to restart IDE if deadlocked");
+            }
+        }
+    }
+    
+    /**
+     * Check if WebView is truly unresponsive (conservative check).
+     * Only returns true for clear indicators of complete deadlock.
+     */
+    private boolean isWebViewTrulyUnresponsive() {
+        try {
+            JComponent component = browser.getComponent();
+            if (component == null || !component.isDisplayable()) {
+                return false; // Component not ready, not necessarily deadlocked
+            }
+            
+            boolean isShowing = component.isShowing();
+            boolean hasBlackBackground = false;
+            boolean hasInvalidDimensions = false;
+            
+            // Check for black background (strong indicator of black rectangle issue)
+            Color backgroundColor = component.getBackground();
+            if (backgroundColor != null && backgroundColor.equals(Color.BLACK) && isShowing) {
+                hasBlackBackground = true;
+            }
+            
+            // Check for invalid dimensions while showing
+            if (isShowing && (component.getWidth() <= 0 || component.getHeight() <= 0)) {
+                hasInvalidDimensions = true;
+            }
+            
+            // Very conservative: Only consider unresponsive if we have multiple clear indicators
+            boolean isUnresponsive = hasBlackBackground && (hasInvalidDimensions || 
+                                   (consecutiveRenderIssues.get() > MAX_CONSECUTIVE_RENDER_ISSUES + 2));
+            
+            if (isUnresponsive) {
+                debugLogger.debug("WebView truly unresponsive - blackBackground: {}, invalidDimensions: {}, consecutiveIssues: {}", 
+                                hasBlackBackground, hasInvalidDimensions, consecutiveRenderIssues.get());
+            }
+            
+            return isUnresponsive;
+            
+        } catch (Exception e) {
+            debugLogger.debug("Error checking WebView responsiveness: {}", e.getMessage());
+            return false; // If we can't check, assume it's responsive
         }
     }
     
